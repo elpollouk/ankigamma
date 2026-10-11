@@ -19,8 +19,15 @@ const STYLE = `
 `;
 
 const REQUESTS = {
-    gaeilge: async (phrase) => {
-        const response = await fetch(`https://synthesis.abair.ie/api/synthesise?input=${phrase}&voice=ga_CO_snc_piper&normalise=true`);
+    gaeilge: async (input) => {
+        const response = await fetch("https://api.abair.ie/v4/synthesis", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Abair-Api-Key": "anon_abair",
+            },
+            body: JSON.stringify({ input, voice: "sibeal" }),
+        });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -40,7 +47,6 @@ if (!currentScript) {
 }
 const language = currentScript.dataset.language || 'gaeilge';
 const phrase = currentScript.dataset.phrase || 'Dia duit';
-const encodedPhrase = /%[0-9A-Fa-f]{2}/.test(phrase) ? phrase : encodeURIComponent(phrase);
 
 // Create the DOM elements to insert into the card and make sure they are available for the functions below to use
 const root = document.createElement("div");
@@ -54,7 +60,7 @@ async function speak() {
     if (!player.src) {
         requestButton.innerText = "⏳";
         const request = REQUESTS[language];
-        player.src = await request(encodedPhrase);
+        player.src = await request(phrase);
     }
 
     await player.play();
