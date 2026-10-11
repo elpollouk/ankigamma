@@ -47,6 +47,7 @@ if (!currentScript) {
 }
 const language = currentScript.dataset.language || 'gaeilge';
 const phrase = currentScript.dataset.phrase || 'Dia duit';
+const input = /%[0-9A-Fa-f]{2}/.test(phrase) ? decodeURIComponent(phrase) : phrase;
 
 // Create the DOM elements to insert into the card and make sure they are available for the functions below to use
 const root = document.createElement("div");
@@ -60,7 +61,7 @@ async function speak() {
     if (!player.src) {
         requestButton.innerText = "⏳";
         const request = REQUESTS[language];
-        player.src = await request(phrase);
+        player.src = await request(input);
     }
 
     await player.play();
