@@ -1,5 +1,10 @@
 (function() {
 
+const MAX_CACHE_SIZE_BYTES = 50 * 1024 * 1024; // Total estimated size across cached audio entries.
+const CACHE_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+const CACHE_DATABASE_NAME = "ankigamma-audio-cache";
+const CACHE_STORE_NAME = "audio";
+
 const STYLE = `
 .gamma button {
   color: #ffffff;
@@ -40,6 +45,159 @@ const REQUESTS = {
     },
 }
 
+let cacheDatabasePromise;
+let cacheWarningShown = false;
+
+async function openCacheDatabase() {
+    if (typeof indexedDB === "undefined") {
+        throw new Error("IndexedDB is not available.");
+    }
+
+    if (!cacheDatabasePromise) {
+        cacheDatabasePromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(CACHE_DATABASE_NAME, 1);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(CACHE_STORE_NAME)) {
+                    request.result.createObjectStore(CACHE_STORE_NAME, { keyPath: "key" });
+                }
+            };
+            request.onsuccess = () => {
+                request.result.onversionchange = () => request.result.close();
+                resolve(request.result);
+            };
+            request.onerror = () => reject(request.error || new Error("Could not open the audio cache."));
+        }).catch(error => {
+            cacheDatabasePromise = null;
+            throw error;
+        });
+    }
+
+    return cacheDatabasePromise;
+}
+
+async function readCachedAudio(key) {
+    const database = await openCacheDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(CACHE_STORE_NAME, "readwrite");
+        const store = transaction.objectStore(CACHE_STORE_NAME);
+        const request = store.get(key);
+        let audio = null;
+        let expiredEntrySize = 0;
+
+        request.onsuccess = () => {
+            const entry = request.result;
+            if (!entry) return;
+
+            if (Date.now() - entry.createdAt >= CACHE_EXPIRY_MS) {
+                store.delete(key);
+                expiredEntrySize = entry.size;
+                return;
+            }
+
+            entry.lastAccessedAt = Date.now();
+            store.put(entry);
+            audio = entry.audio;
+        };
+        request.onerror = () => reject(request.error || new Error("Could not read the audio cache."));
+        transaction.oncomplete = () => {
+            if (expiredEntrySize) {
+                console.info(`Anki Gamma: evicted 1 expired cache entry (${expiredEntrySize} estimated bytes).`);
+            }
+            resolve(audio);
+        };
+        transaction.onerror = () => reject(transaction.error || new Error("Could not read the audio cache."));
+        transaction.onabort = () => reject(transaction.error || new Error("Audio cache read was aborted."));
+    });
+}
+
+async function writeCachedAudio(key, audio) {
+    // Estimate UTF-16 string storage; browser database overhead is not included.
+    const size = audio.length * 2;
+    if (size > MAX_CACHE_SIZE_BYTES || MAX_CACHE_SIZE_BYTES <= 0) {
+        return;
+    }
+
+    const database = await openCacheDatabase();
+    return new Promise((resolve, reject) => {
+        const transaction = database.transaction(CACHE_STORE_NAME, "readwrite");
+        const store = transaction.objectStore(CACHE_STORE_NAME);
+        const request = store.getAll();
+        let expiredEntryCount = 0;
+        let expiredEntrySize = 0;
+        let lruEntryCount = 0;
+        let lruEntrySize = 0;
+        let finalEntryCount = 0;
+        let finalCacheSize = 0;
+
+        request.onsuccess = () => {
+            const now = Date.now();
+            const entries = request.result.filter(entry => {
+                if (now - entry.createdAt >= CACHE_EXPIRY_MS) {
+                    store.delete(entry.key);
+                    expiredEntryCount++;
+                    expiredEntrySize += entry.size;
+                    return false;
+                }
+                return entry.key !== key;
+            });
+
+            let totalSize = entries.reduce((total, entry) => total + entry.size, 0);
+            entries.sort((a, b) => a.lastAccessedAt - b.lastAccessedAt);
+
+            while (totalSize + size > MAX_CACHE_SIZE_BYTES && entries.length) {
+                const oldest = entries.shift();
+                totalSize -= oldest.size;
+                store.delete(oldest.key);
+                lruEntryCount++;
+                lruEntrySize += oldest.size;
+            }
+
+            store.put({ key, audio, size, createdAt: now, lastAccessedAt: now });
+            finalEntryCount = entries.length + 1;
+            finalCacheSize = totalSize + size;
+        };
+        request.onerror = () => reject(request.error || new Error("Could not update the audio cache."));
+        transaction.oncomplete = () => {
+            if (expiredEntryCount) {
+                console.info(`Anki Gamma: evicted ${expiredEntryCount} expired cache entries (${expiredEntrySize} estimated bytes).`);
+            }
+            if (lruEntryCount) {
+                console.info(`Anki Gamma: evicted ${lruEntryCount} least-recently-used cache entries to make room (${lruEntrySize} estimated bytes).`);
+            }
+            console.info(`Anki Gamma: cache size is ${finalCacheSize} estimated bytes across ${finalEntryCount} entries.`);
+            resolve();
+        };
+        transaction.onerror = () => reject(transaction.error || new Error("Could not update the audio cache."));
+        transaction.onabort = () => reject(transaction.error || new Error("Audio cache write was aborted."));
+    });
+}
+
+function warnCacheFailure(error) {
+    if (!cacheWarningShown) {
+        console.warn("Anki Gamma: audio caching is unavailable; continuing without cache.", error);
+        cacheWarningShown = true;
+    }
+}
+
+async function getCachedAudio(key) {
+    if (MAX_CACHE_SIZE_BYTES <= 0) return null;
+
+    try {
+        return await readCachedAudio(key);
+    } catch (error) {
+        warnCacheFailure(error);
+        return null;
+    }
+}
+
+async function cacheAudio(key, audio) {
+    try {
+        await writeCachedAudio(key, audio);
+    } catch (error) {
+        warnCacheFailure(error);
+    }
+}
+
 // Extract the configuration for this playback element
 const currentScript = document.currentScript;
 if (!currentScript) {
@@ -60,8 +218,17 @@ async function speak() {
 
     if (!player.src) {
         requestButton.innerText = "⏳";
-        const request = REQUESTS[language];
-        player.src = await request(input);
+        const cacheKey = `v1|${language}|v4|sibeal|${input}`;
+        const cachedAudio = await getCachedAudio(cacheKey);
+        if (cachedAudio) {
+            player.src = cachedAudio;
+            console.info("Anki Gamma: playing audio from cache.");
+        } else {
+            console.info("Anki Gamma: fetching audio from HTTP service.");
+            const request = REQUESTS[language];
+            player.src = await request(input);
+            await cacheAudio(cacheKey, player.src);
+        }
     }
 
     await player.play();
