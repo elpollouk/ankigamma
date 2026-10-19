@@ -48,6 +48,65 @@ const REQUESTS = {
 let cacheDatabasePromise;
 let cacheWarningShown = false;
 
+function base64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) {
+        bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+}
+
+function bytesToBase64(bytes) {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+}
+
+async function transformAudioBytes(bytes, CompressionStreamType) {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStreamType("gzip"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function encodeCachedAudio(audio) {
+    if (typeof CompressionStream === "undefined" || typeof DecompressionStream === "undefined" ||
+        typeof Blob === "undefined" || typeof Blob.prototype.stream !== "function" || typeof Response === "undefined") {
+        return { audio, size: audio.length * 2 };
+    }
+
+    const dataUri = /^data:audio\/wav;base64,(.*)$/.exec(audio);
+    if (!dataUri) {
+        return { audio, size: audio.length * 2 };
+    }
+
+    const uncompressed = base64ToBytes(dataUri[1]);
+    const compressed = await transformAudioBytes(uncompressed, CompressionStream);
+    const compressionRatio = (compressed.byteLength / uncompressed.byteLength) * 100;
+    console.info(
+        `Anki Gamma: audio compression: ${uncompressed.byteLength} bytes uncompressed, ` +
+        `${compressed.byteLength} bytes compressed (${compressionRatio.toFixed(1)}% of original).`
+    );
+    if (compressed.byteLength >= audio.length * 2) {
+        return { audio, size: audio.length * 2 };
+    }
+    return { audio: compressed, encoding: "gzip", size: compressed.byteLength };
+}
+
+async function decodeCachedAudio(entry) {
+    if (entry.encoding !== "gzip") {
+        return entry.audio;
+    }
+    if (typeof DecompressionStream === "undefined") {
+        throw new Error("DecompressionStream is not available.");
+    }
+
+    const bytes = await transformAudioBytes(entry.audio, DecompressionStream);
+    return `data:audio/wav;base64,${bytesToBase64(bytes)}`;
+}
+
 async function openCacheDatabase() {
     if (typeof indexedDB === "undefined") {
         throw new Error("IndexedDB is not available.");
@@ -81,7 +140,7 @@ async function readCachedAudio(key) {
         const transaction = database.transaction(CACHE_STORE_NAME, "readwrite");
         const store = transaction.objectStore(CACHE_STORE_NAME);
         const request = store.get(key);
-        let audio = null;
+        let cachedEntry = null;
         let expiredEntrySize = 0;
 
         request.onsuccess = () => {
@@ -96,14 +155,18 @@ async function readCachedAudio(key) {
 
             entry.lastAccessedAt = Date.now();
             store.put(entry);
-            audio = entry.audio;
+            cachedEntry = entry;
         };
         request.onerror = () => reject(request.error || new Error("Could not read the audio cache."));
-        transaction.oncomplete = () => {
+        transaction.oncomplete = async () => {
             if (expiredEntrySize) {
                 console.info(`Anki Gamma: evicted 1 expired cache entry (${expiredEntrySize} estimated bytes).`);
             }
-            resolve(audio);
+            try {
+                resolve(cachedEntry ? await decodeCachedAudio(cachedEntry) : null);
+            } catch (error) {
+                reject(error);
+            }
         };
         transaction.onerror = () => reject(transaction.error || new Error("Could not read the audio cache."));
         transaction.onabort = () => reject(transaction.error || new Error("Audio cache read was aborted."));
@@ -111,8 +174,8 @@ async function readCachedAudio(key) {
 }
 
 async function writeCachedAudio(key, audio) {
-    // Estimate UTF-16 string storage; browser database overhead is not included.
-    const size = audio.length * 2;
+    const cachedAudio = await encodeCachedAudio(audio);
+    const size = cachedAudio.size;
     if (size > MAX_CACHE_SIZE_BYTES || MAX_CACHE_SIZE_BYTES <= 0) {
         return;
     }
@@ -152,7 +215,7 @@ async function writeCachedAudio(key, audio) {
                 lruEntrySize += oldest.size;
             }
 
-            store.put({ key, audio, size, createdAt: now, lastAccessedAt: now });
+            store.put({ key, ...cachedAudio, createdAt: now, lastAccessedAt: now });
             finalEntryCount = entries.length + 1;
             finalCacheSize = totalSize + size;
         };
