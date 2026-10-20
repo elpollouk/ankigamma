@@ -134,6 +134,37 @@ async function openCacheDatabase() {
     return cacheDatabasePromise;
 }
 
+async function stats() {
+    const database = await openCacheDatabase();
+    const entries = await new Promise((resolve, reject) => {
+        const transaction = database.transaction(CACHE_STORE_NAME, "readonly");
+        const request = transaction.objectStore(CACHE_STORE_NAME).getAll();
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("Could not read the audio cache stats."));
+        transaction.onerror = () => reject(transaction.error || new Error("Could not read the audio cache stats."));
+        transaction.onabort = () => reject(transaction.error || new Error("Audio cache stats read was aborted."));
+    });
+    const totalSizeBytes = entries.reduce((total, entry) => total + entry.size, 0);
+    const largestEntry = entries.reduce((largest, entry) => entry.size > largest.size ? entry : largest, entries[0]);
+    const smallestEntry = entries.reduce((smallest, entry) => entry.size < smallest.size ? entry : smallest, entries[0]);
+    const stats = {
+        entryCount: entries.length,
+        estimatedSizeBytes: totalSizeBytes,
+        maximumSizeBytes: MAX_CACHE_SIZE_BYTES,
+        utilizationPercent: MAX_CACHE_SIZE_BYTES > 0 ? Number((totalSizeBytes / MAX_CACHE_SIZE_BYTES * 100).toFixed(1)) : null,
+        averageEntrySizeBytes: entries.length ? Number((totalSizeBytes / entries.length).toFixed(1)) : 0,
+        largestEntry: largestEntry ? { key: largestEntry.key, sizeBytes: largestEntry.size } : null,
+        smallestEntry: smallestEntry ? { key: smallestEntry.key, sizeBytes: smallestEntry.size } : null,
+    };
+
+    console.info("Anki Gamma: audio cache database stats", stats);
+    return stats;
+}
+
+window.$gamma = window.$gamma || {};
+window.$gamma.stats = stats;
+
 async function readCachedAudio(key) {
     const database = await openCacheDatabase();
     return new Promise((resolve, reject) => {
@@ -227,7 +258,8 @@ async function writeCachedAudio(key, audio) {
             if (lruEntryCount) {
                 console.info(`Anki Gamma: evicted ${lruEntryCount} least-recently-used cache entries to make room (${lruEntrySize} estimated bytes).`);
             }
-            console.info(`Anki Gamma: cache size is ${finalCacheSize} estimated bytes across ${finalEntryCount} entries.`);
+            const cacheUtilizationPercent = (finalCacheSize / MAX_CACHE_SIZE_BYTES * 100).toFixed(1);
+            console.info(`Anki Gamma: cache size is ${finalCacheSize} estimated bytes (${cacheUtilizationPercent}% of maximum) across ${finalEntryCount} entries.`);
             resolve();
         };
         transaction.onerror = () => reject(transaction.error || new Error("Could not update the audio cache."));
