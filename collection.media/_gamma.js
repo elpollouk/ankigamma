@@ -1,5 +1,7 @@
 (function() {
 
+const VERSION = "3";
+const API_KEY = "anon_abair";
 const MAX_CACHE_SIZE_BYTES = 50 * 1024 * 1024; // Total estimated size across cached audio entries.
 const CACHE_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 const CACHE_DATABASE_NAME = "ankigamma-audio-cache";
@@ -16,10 +18,87 @@ const STYLE = `
   margin-top: 10px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
   transition: background-color 0.2s ease;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .gamma button:active {
   transform: scale(0.9);
+}
+
+.gamma-version-watermark {
+  position: fixed;
+  right: 6px;
+  bottom: 4px;
+  z-index: 2147483646;
+  margin: 0;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: rgba(128, 128, 128, 0.65);
+  font: 10px sans-serif;
+  cursor: pointer;
+}
+
+.gamma-stats-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  font: 16px sans-serif;
+}
+
+.gamma-stats-panel {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 360px;
+  padding: 20px;
+  border-radius: 12px;
+  background: #252525;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.gamma-stats-panel h2 {
+  margin: 0 0 14px;
+  font-size: 20px;
+}
+
+.gamma-stats-panel dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 16px;
+  margin: 0 0 16px;
+}
+
+.gamma-stats-panel dt,
+.gamma-stats-panel dd {
+  margin: 0;
+}
+
+.gamma-stats-panel dt {
+  text-align: left;
+}
+
+.gamma-stats-panel dd {
+  text-align: right;
+}
+
+.gamma-stats-panel button {
+  box-sizing: border-box;
+  color: #ffffff;
+  border: none;
+  padding: 10px 18px;
+  font-size: 16px;
+  width: 100%;
+  border-radius: 8px;
+  margin: 0;
+  background: #555555;
+  cursor: pointer;
 }
 `;
 
@@ -29,7 +108,7 @@ const REQUESTS = {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Abair-Api-Key": "anon_abair",
+                "Abair-Api-Key": API_KEY,
             },
             body: JSON.stringify({ input, voice: "sibeal" }),
         });
@@ -164,6 +243,77 @@ async function stats() {
 
 window.$gamma = window.$gamma || {};
 window.$gamma.stats = stats;
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KiB", "MiB", "GiB"];
+    let value = bytes;
+    let unitIndex = -1;
+    do {
+        value /= 1024;
+        unitIndex++;
+    } while (value >= 1024 && unitIndex < units.length - 1);
+    return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+async function showStats() {
+    const cacheStats = await stats();
+    const existingOverlay = document.querySelector(".gamma-stats-overlay");
+    if (existingOverlay) existingOverlay.remove();
+
+    const overlay = document.createElement("div");
+    overlay.className = "gamma-stats-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "gamma-stats-title");
+
+    const panel = document.createElement("section");
+    panel.className = "gamma-stats-panel";
+    const title = document.createElement("h2");
+    title.id = "gamma-stats-title";
+    title.textContent = "Audio cache";
+    panel.appendChild(title);
+
+    const details = document.createElement("dl");
+    const rows = [
+        ["Entries", cacheStats.entryCount],
+        ["Storage used", formatBytes(cacheStats.estimatedSizeBytes)],
+        ["Maximum", formatBytes(cacheStats.maximumSizeBytes)],
+        ["Used", cacheStats.utilizationPercent === null ? "N/A" : `${cacheStats.utilizationPercent}%`],
+        ["Average entry", formatBytes(cacheStats.averageEntrySizeBytes)],
+        ["Largest entry", cacheStats.largestEntry ? formatBytes(cacheStats.largestEntry.sizeBytes) : "N/A"],
+        ["Smallest entry", cacheStats.smallestEntry ? formatBytes(cacheStats.smallestEntry.sizeBytes) : "N/A"],
+    ];
+    for (const [label, value] of rows) {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const description = document.createElement("dd");
+        description.textContent = String(value);
+        details.append(term, description);
+    }
+    panel.appendChild(details);
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.textContent = "Close";
+    panel.appendChild(closeButton);
+    overlay.appendChild(panel);
+
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener("keydown", onKeyDown);
+    };
+    const onKeyDown = event => {
+        if (event.key === "Escape") close();
+    };
+    closeButton.addEventListener("click", close);
+    overlay.addEventListener("click", event => {
+        if (event.target === overlay) close();
+    });
+    document.addEventListener("keydown", onKeyDown);
+    document.body.appendChild(overlay);
+    closeButton.focus();
+}
 
 async function readCachedAudio(key) {
     const database = await openCacheDatabase();
@@ -359,4 +509,19 @@ root.appendChild(requestButton);
 root.appendChild(player);
 
 currentScript.insertAdjacentElement("beforebegin", root);
+
+if (!document.querySelector(".gamma-version-watermark")) {
+    const versionWatermark = document.createElement("button");
+    versionWatermark.type = "button";
+    versionWatermark.className = "gamma-version-watermark";
+    versionWatermark.textContent = `v${VERSION}`;
+    versionWatermark.setAttribute("aria-label", `Anki Gamma ${VERSION}: show audio cache stats`);
+    versionWatermark.addEventListener("click", () => {
+        showStats().catch(error => {
+            console.error("Anki Gamma: could not display audio cache stats.", error);
+            alert(error.message);
+        });
+    });
+    document.body.appendChild(versionWatermark);
+}
 })();
